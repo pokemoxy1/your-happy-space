@@ -1,94 +1,263 @@
-let lastCapturedError;
-const TTL_MS = 5e3;
-function record(error) {
-  lastCapturedError = { error, at: Date.now() };
+'use strict';
+
+class QuickLRU {
+	constructor(options = {}) {
+		if (!(options.maxSize && options.maxSize > 0)) {
+			throw new TypeError('`maxSize` must be a number greater than 0');
+		}
+
+		if (typeof options.maxAge === 'number' && options.maxAge === 0) {
+			throw new TypeError('`maxAge` must be a number greater than 0');
+		}
+
+		this.maxSize = options.maxSize;
+		this.maxAge = options.maxAge || Infinity;
+		this.onEviction = options.onEviction;
+		this.cache = new Map();
+		this.oldCache = new Map();
+		this._size = 0;
+	}
+
+	_emitEvictions(cache) {
+		if (typeof this.onEviction !== 'function') {
+			return;
+		}
+
+		for (const [key, item] of cache) {
+			this.onEviction(key, item.value);
+		}
+	}
+
+	_deleteIfExpired(key, item) {
+		if (typeof item.expiry === 'number' && item.expiry <= Date.now()) {
+			if (typeof this.onEviction === 'function') {
+				this.onEviction(key, item.value);
+			}
+
+			return this.delete(key);
+		}
+
+		return false;
+	}
+
+	_getOrDeleteIfExpired(key, item) {
+		const deleted = this._deleteIfExpired(key, item);
+		if (deleted === false) {
+			return item.value;
+		}
+	}
+
+	_getItemValue(key, item) {
+		return item.expiry ? this._getOrDeleteIfExpired(key, item) : item.value;
+	}
+
+	_peek(key, cache) {
+		const item = cache.get(key);
+
+		return this._getItemValue(key, item);
+	}
+
+	_set(key, value) {
+		this.cache.set(key, value);
+		this._size++;
+
+		if (this._size >= this.maxSize) {
+			this._size = 0;
+			this._emitEvictions(this.oldCache);
+			this.oldCache = this.cache;
+			this.cache = new Map();
+		}
+	}
+
+	_moveToRecent(key, item) {
+		this.oldCache.delete(key);
+		this._set(key, item);
+	}
+
+	* _entriesAscending() {
+		for (const item of this.oldCache) {
+			const [key, value] = item;
+			if (!this.cache.has(key)) {
+				const deleted = this._deleteIfExpired(key, value);
+				if (deleted === false) {
+					yield item;
+				}
+			}
+		}
+
+		for (const item of this.cache) {
+			const [key, value] = item;
+			const deleted = this._deleteIfExpired(key, value);
+			if (deleted === false) {
+				yield item;
+			}
+		}
+	}
+
+	get(key) {
+		if (this.cache.has(key)) {
+			const item = this.cache.get(key);
+
+			return this._getItemValue(key, item);
+		}
+
+		if (this.oldCache.has(key)) {
+			const item = this.oldCache.get(key);
+			if (this._deleteIfExpired(key, item) === false) {
+				this._moveToRecent(key, item);
+				return item.value;
+			}
+		}
+	}
+
+	set(key, value, {maxAge = this.maxAge === Infinity ? undefined : Date.now() + this.maxAge} = {}) {
+		if (this.cache.has(key)) {
+			this.cache.set(key, {
+				value,
+				maxAge
+			});
+		} else {
+			this._set(key, {value, expiry: maxAge});
+		}
+	}
+
+	has(key) {
+		if (this.cache.has(key)) {
+			return !this._deleteIfExpired(key, this.cache.get(key));
+		}
+
+		if (this.oldCache.has(key)) {
+			return !this._deleteIfExpired(key, this.oldCache.get(key));
+		}
+
+		return false;
+	}
+
+	peek(key) {
+		if (this.cache.has(key)) {
+			return this._peek(key, this.cache);
+		}
+
+		if (this.oldCache.has(key)) {
+			return this._peek(key, this.oldCache);
+		}
+	}
+
+	delete(key) {
+		const deleted = this.cache.delete(key);
+		if (deleted) {
+			this._size--;
+		}
+
+		return this.oldCache.delete(key) || deleted;
+	}
+
+	clear() {
+		this.cache.clear();
+		this.oldCache.clear();
+		this._size = 0;
+	}
+	
+	resize(newSize) {
+		if (!(newSize && newSize > 0)) {
+			throw new TypeError('`maxSize` must be a number greater than 0');
+		}
+
+		const items = [...this._entriesAscending()];
+		const removeCount = items.length - newSize;
+		if (removeCount < 0) {
+			this.cache = new Map(items);
+			this.oldCache = new Map();
+			this._size = items.length;
+		} else {
+			if (removeCount > 0) {
+				this._emitEvictions(items.slice(0, removeCount));
+			}
+
+			this.oldCache = new Map(items.slice(removeCount));
+			this.cache = new Map();
+			this._size = 0;
+		}
+
+		this.maxSize = newSize;
+	}
+
+	* keys() {
+		for (const [key] of this) {
+			yield key;
+		}
+	}
+
+	* values() {
+		for (const [, value] of this) {
+			yield value;
+		}
+	}
+
+	* [Symbol.iterator]() {
+		for (const item of this.cache) {
+			const [key, value] = item;
+			const deleted = this._deleteIfExpired(key, value);
+			if (deleted === false) {
+				yield [key, value.value];
+			}
+		}
+
+		for (const item of this.oldCache) {
+			const [key, value] = item;
+			if (!this.cache.has(key)) {
+				const deleted = this._deleteIfExpired(key, value);
+				if (deleted === false) {
+					yield [key, value.value];
+				}
+			}
+		}
+	}
+
+	* entriesDescending() {
+		let items = [...this.cache];
+		for (let i = items.length - 1; i >= 0; --i) {
+			const item = items[i];
+			const [key, value] = item;
+			const deleted = this._deleteIfExpired(key, value);
+			if (deleted === false) {
+				yield [key, value.value];
+			}
+		}
+
+		items = [...this.oldCache];
+		for (let i = items.length - 1; i >= 0; --i) {
+			const item = items[i];
+			const [key, value] = item;
+			if (!this.cache.has(key)) {
+				const deleted = this._deleteIfExpired(key, value);
+				if (deleted === false) {
+					yield [key, value.value];
+				}
+			}
+		}
+	}
+
+	* entriesAscending() {
+		for (const [key, value] of this._entriesAscending()) {
+			yield [key, value.value];
+		}
+	}
+
+	get size() {
+		if (!this._size) {
+			return this.oldCache.size;
+		}
+
+		let oldCacheSize = 0;
+		for (const key of this.oldCache.keys()) {
+			if (!this.cache.has(key)) {
+				oldCacheSize++;
+			}
+		}
+
+		return Math.min(this._size + oldCacheSize, this.maxSize);
+	}
 }
-if (typeof globalThis.addEventListener === "function") {
-  globalThis.addEventListener("error", (event) => record(event.error ?? event));
-  globalThis.addEventListener(
-    "unhandledrejection",
-    (event) => record(event.reason)
-  );
-}
-function consumeLastCapturedError() {
-  if (!lastCapturedError) return void 0;
-  if (Date.now() - lastCapturedError.at > TTL_MS) {
-    lastCapturedError = void 0;
-    return void 0;
-  }
-  const { error } = lastCapturedError;
-  lastCapturedError = void 0;
-  return error;
-}
-function renderErrorPage() {
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>This page didn't load</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      body { font: 15px/1.5 system-ui, -apple-system, sans-serif; background: #fafafa; color: #111; display: grid; place-items: center; min-height: 100vh; margin: 0; padding: 1.5rem; }
-      .card { max-width: 28rem; width: 100%; text-align: center; padding: 2rem; }
-      h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
-      p { color: #4b5563; margin: 0 0 1.5rem; }
-      .actions { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; }
-      a, button { padding: 0.5rem 1rem; border-radius: 0.375rem; font: inherit; cursor: pointer; text-decoration: none; border: 1px solid transparent; }
-      .primary { background: #111; color: #fff; }
-      .secondary { background: #fff; color: #111; border-color: #d1d5db; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>This page didn't load</h1>
-      <p>Something went wrong on our end. You can try refreshing or head back home.</p>
-      <div class="actions">
-        <button class="primary" onclick="location.reload()">Try again</button>
-        <a class="secondary" href="/">Go home</a>
-      </div>
-    </div>
-  </body>
-</html>`;
-}
-let serverEntryPromise;
-async function getServerEntry() {
-  if (!serverEntryPromise) {
-    serverEntryPromise = import("./assets/server-CxuiW-DG.js").then((n) => n.s).then(
-      (m) => m.default ?? m
-    );
-  }
-  return serverEntryPromise;
-}
-async function normalizeCatastrophicSsrResponse(response) {
-  if (response.status < 500) return response;
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) return response;
-  const body = await response.clone().text();
-  if (!body.includes('"unhandled":true') || !body.includes('"message":"HTTPError"')) {
-    return response;
-  }
-  console.error(consumeLastCapturedError() ?? new Error(`h3 swallowed SSR error: ${body}`));
-  return new Response(renderErrorPage(), {
-    status: 500,
-    headers: { "content-type": "text/html; charset=utf-8" }
-  });
-}
-const server = {
-  async fetch(request, env, ctx) {
-    try {
-      const handler = await getServerEntry();
-      const response = await handler.fetch(request, env, ctx);
-      return await normalizeCatastrophicSsrResponse(response);
-    } catch (error) {
-      console.error(error);
-      return new Response(renderErrorPage(), {
-        status: 500,
-        headers: { "content-type": "text/html; charset=utf-8" }
-      });
-    }
-  }
-};
-export {
-  server as default,
-  renderErrorPage as r
-};
+
+module.exports = QuickLRU;
