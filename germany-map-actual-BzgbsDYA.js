@@ -1,0 +1,1 @@
+import{c as a}from"./truck-n89iKin_.js";const c=[["path",{d:"M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0",key:"1r0f0z"}],["circle",{cx:"12",cy:"10",r:"3",key:"ilqhr7"}]],r=a("map-pin",c),t="/assets/germany-map-actual-CTqb8zu-.jpg";export{r as M,t as g};

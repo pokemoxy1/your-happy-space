@@ -1,0 +1,1 @@
+import{j as r,C as e,O as o}from"./index-B2ipT8vR.js";import{b as s,a as t}from"./SiteFooter-CfgR2Dix.js";import"./truck-n89iKin_.js";function m(){return r.jsx(e,{children:r.jsxs("div",{className:"min-h-screen bg-white",children:[r.jsx(s,{}),r.jsx(o,{}),r.jsx(t,{})]})})}export{m as component};
